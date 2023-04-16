@@ -10,13 +10,11 @@ import urllib.parse, zlib, sys
 
 steamcmd = '/home/steam/steamcmd/steamcmd.sh'
 install_dir = '/home/steam/ARK'
-
 mod_dir = os.path.join(install_dir, 'steamapps', 'workshop', 'content', '346110')
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 formatter = logging.Formatter('%(levelname)s: %(message)s')
-
 stream_handler = logging.StreamHandler()
 stream_handler.setFormatter(formatter)
 logger.addHandler(stream_handler)
@@ -66,9 +64,10 @@ def extract_mod(modid):
         expect_size = int(f.read())
    
       if real_size != expect_size:
-        logger.error('extract_file: uncompressed_size is incorrect')
-        return
-
+        err = Exception('ARKMOD', 'extract_file: uncompressed_size is incorrect')
+        logger.info(err)
+        raise(err)
+        
       os.unlink(src)
       os.unlink(uncompressed)
 
@@ -138,9 +137,8 @@ def install_mod(modid):
   shutil.copytree(source, target)
   shutil.move(target+'/.mod', target+'.mod')
 
-
 def download_mods(modids):
-  if len(modids) == 0: return [],[]
+  if len(modids) == 0: return []
 
   cmd = []
   cmd.extend([steamcmd])
@@ -151,30 +149,44 @@ def download_mods(modids):
   cmd.extend(['+workshop_status', '346110'])
   cmd.extend(['+quit'])
 
-  outs = []
+  success_lines = []
+
   with subprocess.Popen(cmd, stdout=subprocess.PIPE) as proc:
     for line in proc.stdout:
-      out = line.decode('utf-8').strip()
-      outs.append(out)
-      logger.info('process stdout: {}'.format(out))
+      line = line.decode('utf-8').strip()
+      if 'Success. Downloaded item' in line:
+        success_lines.append(line)
+     
+      logger.info('process stdout: {}'.format(line))
     logger.info('process return: {}'.format(proc.returncode))
-
 
   success_mods = []
   failed_mods = []
-# TODO XXX
+
   for modid in modids:
-    if not os.path.isdir(os.path.join(mod_dir, str(modid))):
+    found = False
+    for line in success_lines:
+      if 'Success. Downloaded item {} to'.format(modid):
+        found = True
+        break
+
+    if found:
+      success_mods.append(modid)
+    else:
       failed_mods.append(modid)
-      continue
 
-    success_mods.append(modid)
+  print('!!! success_mods', success_mods)
+  print('!!! failed_mods', failed_mods)
 
+  for modid in success_mods:
     updated = parse_mod_updated(modid)
     with open(os.path.join(mod_dir, str(modid), "WindowsNoEditor", 'updated_time'), 'w+') as f:
       f.write(str(updated))
 
-  return success_mods, failed_mods
+  if failed_mods:
+    logger.error('mod download failure: {}'.format(failed_mods))
+
+  return success_mods
 
 def parse_mod_updated(modid):
   appworkshop_file = os.path.join(install_dir, 'steamapps', 'workshop', 'appworkshop_346110.acf')
@@ -201,7 +213,6 @@ def get_local_mod_updated(modid):
 
   return updated_time
 
-
 def get_workshop_mod_updated(modid):
   resp = requests.post(url='http://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1',
                        data={'itemcount':'1', 'publishedfileids[0]': modid})
@@ -226,38 +237,76 @@ def has_mod_update(modid):
   worksh = get_workshop_mod_updated(modid)
 
   if local == worksh:
-    logger.info("latest version: %s local(%s) == ws(%s)", modid, local, worksh)
+    logger.info("mod latest version: %s local(%s) == ws(%s)", modid, local, worksh)
     return False
   elif local < worksh:
-    logger.info("old version: %s local(%s) < ws(%s)", modid, local, worksh)
+    logger.info("mod update required: %s local(%s) < ws(%s)", modid, local, worksh)
     return True
   else:
     err = Exception('MODManager', 'workshop updated time is before local updated time: {} local({}) > ws({})'.format(modid, local, worksh))
     logger.error(err)
     raise err
 
+def filter_update_required(modids):
+  update_required_mods = []
+  for modid in modids:
+    if not has_mod_update(modid): continue
+    update_required_mods.append(modid)
+  return update_required_mods
 
-modids = [569786012,1999447172,1609138312,1315534671,2182894352,1551199162,2198615778,849985437] 
+def extract_mods(modids):
+  for modid in modids:
+    extract_mod(modid)
+  return modids
+
+def create_mod_files(modids):
+  for modid in modids:
+    create_mod_file(modid)
+  return modids
+
+def install_mods(modids):
+  for modid in modids:
+    install_mod(modid)
+  return modids
+
+def update_mods(modids, check_mode=False, force_update=False):
+  if not force_update:
+    modids = filter_update_required(modids)
+
+  if modids:
+    logger.info('update required mods: {}'.format(modids))
+  else:
+    logger.info('no update needed')
+    return
+
+  if check_mode:
+    return
+
+  modids = download_mods(modids)
+  logger.info('download_mods: {}'.format(modids))
+
+  modids = extract_mods(modids)
+  logger.info('extract_mods: {}'.format(modids))
+
+  modids = create_mod_files(modids)
+  logger.info('create_mod_files: {}'.format(modids))
+
+  modids = install_mods(modids)
+  logger.info('installed mods: {}'.format(modids))
 
 def main():
-  update_modids = []
-  for modid in modids:
-    if not has_mod_update(modid):
-      continue
+  import argparse
+  parser = argparse.ArgumentParser(description='Process some integers.')
+  parser.add_argument('modids', metavar='N', type=int, nargs='+', help='the list of mod ID')
+  parser.add_argument('--force', dest='force_update', action='store_true', default=False, help='force update mods without check')
+  parser.add_argument('--check', dest='check_mode', action='store_true', default=False, help='just for checking update required mods')
 
-    update_modids.append(modid)
+  args = parser.parse_args()
 
-  if not update_modids:
-    logger.info("all mods are up-to-date")
-
-  success_mods, failed_mods = download_mods(update_modids)
-  if failed_mods:
-    logger.error('failed to download mods: {}'.format(failed_mods))
-
-  for modid in success_mods:
-    extract_mod(modid)
-    create_mod_file(modid)
-    install_mod(modid)
+  update_mods(args.modids,
+          check_mode=args.check_mode,
+          force_update=args.force_update)
 
 if __name__ == '__main__':
+  # ./arkmod.py 569786012 1999447172 1609138312 1315534671 2182894352 1551199162 2198615778 849985437
   main()
